@@ -469,7 +469,7 @@ func (c *Client) CreateChatCompletionStream(
 	// visible output. The nil-guard is intentional: when MaxTokens is unset
 	// the caller has imposed no cap, so there is nothing to floor.
 	switch {
-	case !modelinfo.UsesReasoningEffort(c.ModelConfig.Model):
+	case !modelinfo.UsesReasoningEffort(c.ModelConfig.Model) && !modelinfo.UsesThinkingLevel(c.ModelConfig.Model):
 		if c.ModelConfig.ThinkingBudget != nil && !c.ModelConfig.ThinkingBudget.IsDisabled() {
 			c.warnThinkingBudgetIgnored(ctx)
 		}
@@ -497,6 +497,18 @@ func (c *Client) CreateChatCompletionStream(
 		}
 		slog.DebugContext(ctx, "OpenAI request using reasoning effort (NoThinking)", "reasoning_effort", reasoningEffort)
 	case c.ModelConfig.ThinkingBudget != nil:
+		if !modelinfo.UsesReasoningEffort(c.ModelConfig.Model) {
+			effortStr, send, err := geminiChatReasoningEffort(c.ModelConfig.Model, c.ModelConfig.ThinkingBudget)
+			if err != nil {
+				slog.ErrorContext(ctx, "OpenAI request using thinking_budget failed", "error", err)
+				return nil, err
+			}
+			if send {
+				params.ReasoningEffort = shared.ReasoningEffort(effortStr)
+				slog.DebugContext(ctx, "OpenAI request using Gemini reasoning_effort", "reasoning_effort", effortStr)
+			}
+			break
+		}
 		effortStr, err := openAIReasoningEffort(c.ModelConfig.ThinkingBudget)
 		if err != nil {
 			slog.ErrorContext(ctx, "OpenAI request using thinking_budget failed", "error", err)
@@ -1452,6 +1464,35 @@ func openAIReasoningEffort(b *latest.ThinkingBudget) (string, error) {
 		return "", fmt.Errorf("OpenAI reasoning models require a string thinking_budget (%s), got effort: '%s', tokens: '%d'", effort.ValidNames(), b.Effort, b.Tokens)
 	}
 	return s, nil
+}
+
+func geminiChatReasoningEffort(modelID string, b *latest.ThinkingBudget) (string, bool, error) {
+	var (
+		l  effort.Level
+		ok bool
+	)
+	if b.IsAdaptive() {
+		norm := strings.ToLower(strings.TrimSpace(b.Effort))
+		sub, hasSub := strings.CutPrefix(norm, "adaptive/")
+		if !hasSub {
+			return "", false, nil
+		}
+		l, ok = effort.Parse(sub)
+	} else {
+		l, ok = b.EffortLevel()
+	}
+	if !ok {
+		return "", false, fmt.Errorf("gemini 3+ models require a string thinking_budget (%s), got effort: %q, tokens: %d", effort.ValidNames(), b.Effort, b.Tokens)
+	}
+	if l == effort.None {
+		return string(effort.Low), true, nil
+	}
+	clamped := effort.Clamp(modelinfo.SupportedThinkingLevels("google", modelID), l)
+	s, ok := effort.ForGemini(clamped)
+	if !ok {
+		return "", false, fmt.Errorf("gemini 3+ models require a string thinking_budget (%s), got effort: %q, tokens: %d", effort.ValidNames(), b.Effort, b.Tokens)
+	}
+	return s, true, nil
 }
 
 // jsonSchema is a helper type that implements json.Marshaler for map[string]any

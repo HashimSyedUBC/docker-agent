@@ -212,9 +212,17 @@ func warnThinkingCannotBeDisabled(ctx context.Context, providerType string, cfg 
 	switch providerType {
 	case "anthropic", "amazon-bedrock":
 	case "google":
+		publisher, _ := cfg.ProviderOpts["publisher"].(string)
+		if publisher == "" || strings.EqualFold(publisher, "google") {
+			if modelinfo.UsesThinkingLevel(cfg.Model) {
+				slog.WarnContext(ctx, "model cannot disable thinking; thinking_budget none or 0 is sent with thinkingLevel low",
+					"model", cfg.Model, "provider", providerType)
+			}
+			return
+		}
 		// Only Model Garden's Anthropic publisher reaches a Claude client. Not
 		// vertexai.IsModelGardenConfig: importing vertexai links the OpenAI SDK.
-		if publisher, _ := cfg.ProviderOpts["publisher"].(string); !strings.EqualFold(publisher, "anthropic") {
+		if !strings.EqualFold(publisher, "anthropic") {
 			return
 		}
 	default:

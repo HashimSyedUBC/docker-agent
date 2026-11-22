@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"encoding/json"
 	"log/slog"
 	"strings"
 	"testing"
@@ -12,6 +13,7 @@ import (
 	"github.com/docker/docker-agent/pkg/concurrent"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
+	"github.com/docker/docker-agent/pkg/model/provider/options"
 )
 
 // TestChatCompletions_WarnsOnceWhenThinkingBudgetIgnored is the regression
@@ -116,4 +118,101 @@ func TestChatCompletions_NoWarnWhenThinkingBudgetDisabled(t *testing.T) {
 	stream.Close()
 
 	assert.NotContains(t, buf.String(), "thinking_budget is configured")
+}
+
+func TestChatCompletions_GeminiThinkingBudget(t *testing.T) {
+	// Not parallel: swaps the process-global default logger.
+	var buf concurrent.Buffer
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
+	tests := []struct {
+		name       string
+		provider   string
+		model      string
+		budget     *latest.ThinkingBudget
+		opts       []options.Opt
+		wantEffort string
+		wantWarn   bool
+	}{
+		{
+			name:       "vercel gemini-4-neon xhigh",
+			provider:   "vercel",
+			model:      "google/gemini-4-neon",
+			budget:     &latest.ThinkingBudget{Effort: "xhigh"},
+			wantEffort: "xhigh",
+		},
+		{
+			name:       "openrouter gemini-4-carbon clamps xhigh to high",
+			provider:   "openrouter",
+			model:      "google/gemini-4-carbon",
+			budget:     &latest.ThinkingBudget{Effort: "xhigh"},
+			wantEffort: "high",
+		},
+		{
+			name:     "vercel gemini-4-neon adaptive omits reasoning_effort without warning",
+			provider: "vercel",
+			model:    "google/gemini-4-neon",
+			budget:   &latest.ThinkingBudget{Effort: "adaptive"},
+		},
+		{
+			name:       "vercel gemini-4-neon adaptive/low sends low",
+			provider:   "vercel",
+			model:      "google/gemini-4-neon",
+			budget:     &latest.ThinkingBudget{Effort: "adaptive/low"},
+			wantEffort: "low",
+		},
+		{
+			name:       "vercel gemini-4-neon NoThinking sends low",
+			provider:   "vercel",
+			model:      "google/gemini-4-neon",
+			opts:       []options.Opt{options.WithNoThinking()},
+			wantEffort: "low",
+		},
+		{
+			name:     "openai-qualified gemini-4-hydrogen warns and ignores thinking_budget",
+			provider: "openai",
+			model:    "openai/gemini-4-hydrogen",
+			budget:   &latest.ThinkingBudget{Effort: "high"},
+			wantWarn: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			buf.Reset()
+			server, body := captureRequestBody(t)
+			cfg := &latest.ModelConfig{
+				Provider:       tt.provider,
+				Model:          tt.model,
+				BaseURL:        server.URL,
+				TokenKey:       "MY_TOKEN",
+				ThinkingBudget: tt.budget,
+			}
+			env := environment.NewMapEnvProvider(map[string]string{"MY_TOKEN": "secret"})
+
+			client, err := NewClient(t.Context(), cfg, env, tt.opts...)
+			require.NoError(t, err)
+
+			stream, err := client.CreateChatCompletionStream(t.Context(), []chat.Message{{Role: chat.MessageRoleUser, Content: "hi"}}, nil)
+			require.NoError(t, err)
+			drainReasoningTestStream(t, stream)
+			stream.Close()
+
+			var req map[string]any
+			require.NoError(t, json.Unmarshal(body(), &req))
+			if tt.wantEffort != "" {
+				assert.Equal(t, tt.wantEffort, req["reasoning_effort"])
+			} else {
+				assert.NotContains(t, req, "reasoning_effort")
+			}
+
+			if tt.wantWarn {
+				assert.Contains(t, buf.String(), "does not support a reasoning effort parameter")
+			} else {
+				assert.NotContains(t, buf.String(), "does not support a reasoning effort parameter")
+			}
+		})
+	}
 }

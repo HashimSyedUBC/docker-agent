@@ -391,6 +391,24 @@ func UsesThinkingLevel(modelID string) bool {
 	return ok
 }
 
+// GeminiRejectsThinkingBudget reports whether a Google Gemini model rejects
+// the legacy token-based `thinkingBudget` parameter with HTTP 400.
+// Gemini 4+ models only accept `thinkingLevel`; Gemini 3 still accepted
+// `thinkingBudget` for backward compatibility.
+func GeminiRejectsThinkingBudget(modelID string) bool {
+	maj, _, ok := geminiGeneration(modelID)
+	return ok && maj >= 4
+}
+
+// HasGoogleQualifier reports whether modelID is explicitly vendor-qualified
+// with a "google/" or "gemini/" prefix, the convention gateways (Vercel AI
+// Gateway, OpenRouter, Cloudflare AI Gateway) use to route Google's Gemini
+// models through a shared endpoint.
+func HasGoogleQualifier(modelID string) bool {
+	m := strings.ToLower(strings.TrimSpace(modelID))
+	return strings.HasPrefix(m, "google/") || strings.HasPrefix(m, "gemini/")
+}
+
 // IsBedrockClaudeID reports whether a model identifier looks like an Anthropic
 // Claude model on AWS Bedrock.
 //
